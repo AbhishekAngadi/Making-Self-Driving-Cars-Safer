@@ -1,15 +1,19 @@
-# Social LSTM implementation in PyTorch
+# Pedestrian Steps Prediction LSTM Model #Pytorch
 
-## Project details
-**Semester project of Master of Computer Science in EPFL**  
-**Student name** : Baran Nama  
-**Advisor:** Alexandre Alahi  
-**Presentation** : https://drive.google.com/file/d/1biC23s1tbsyDETKKBW8PFXWYyyhNEAuI/view?usp=sharing  
+Pedestrians follow different trajectories to avoid obstacles
+and accommodate fellow pedestrians. Any autonomous
+vehicle navigating such a scene should be able to foresee
+the future positions of pedestrians and accordingly adjust
+its path to avoid collisions. This problem of trajectory prediction
+can be viewed as a sequence generation task, where
+we are interested in predicting the future trajectory of people
+based on their past positions. Following the recent success
+of Recurrent Neural Network (RNN) models for sequence
+prediction tasks, we propose an LSTM model which
+can learn general human movement and predict their future
+trajectories.
 
-## Implementation details
-**Baseline implementation**: https://github.com/vvanirudh/social-lstm-pytorch  
 **Paper**: http://cvgl.stanford.edu/papers/CVPR16_Social_LSTM.pdf  
-**Made improvements:** Please see attached presentation  
 
 ## Documentation
 - **generator.py** : Python script for generating artifical datasets
@@ -26,20 +30,3 @@
 - **visualize.py**: Python script for visualizing predicted trajectories during train/test/validation sessions
 - **vlstm_model.py**: Python file includes Vanilla LSTM model definition
 - **vlstm_train**: Python script for training Vanilla LSTM model
-
-## How to deploy
-1. Fork the repository 
-2.  Start train a model >>> **python train/olstm_train/vlstm.train.py - -[Parameter set]**
-3. If necesarry file structure is not exist (which is the initial situation), train script will run make_directories.sh and this command will automatically create file structure
-4. Enjoy!
-
-## Results  
-
-| Model name | Avarage error | Final error | Mean error |
-| :---: | :---: | :---: | :---: |
-| Social LSTM | 1.3865 | 2.098 | 0.675 |
-| Occupancy LSTM | 2.1105 | 3.12 | 1.101 |
-| Vanilla LSTM | 2.107 | 3.114 | 1.1 |
-
-**Reference**: http://trajnet.stanford.edu/result.php?cid=1
-
