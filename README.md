@@ -1,4 +1,5 @@
-# Pedestrian Steps Prediction LSTM Model #Pytorch
+# Pedestrian Steps Prediction LSTM Model 
+#Pytorch
 
 Pedestrians follow different trajectories to avoid obstacles
 and accommodate fellow pedestrians. Any autonomous
