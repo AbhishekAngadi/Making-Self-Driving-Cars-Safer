@@ -1,0 +1,1278 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Importing Libraries"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import torch\n",
+    "import torch.autograd as autograd\n",
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "import torch.optim as optim\n",
+    "from torch.autograd import Variable\n",
+    "import time\n",
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "from sklearn.metrics import mean_absolute_error\n",
+    "import random\n",
+    "import numpy as np"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# RNN and LSTM Model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from torch.utils.data import Dataset\n",
+    "class Time_Series_Data(Dataset):\n",
+    "\n",
+    "    def __init__(self, train_x, train_y):\n",
+    "        self.X = train_x\n",
+    "        self.y = train_y\n",
+    "\n",
+    "    def __getitem__(self, item):\n",
+    "        x_t = self.X[item]\n",
+    "        y_t = self.y[item]\n",
+    "        return x_t, y_t\n",
+    "\n",
+    "    def __len__(self):\n",
+    "\n",
+    "        return len(self.X)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# RNN\n",
+    "class BaseModel(nn.Module):\n",
+    "\n",
+    "    def __init__(self, inputDim, hiddenNum, outputDim, layerNum, cell, use_cuda=False):\n",
+    "\n",
+    "        super(BaseModel, self).__init__()\n",
+    "        self.hiddenNum = hiddenNum\n",
+    "        self.inputDim = inputDim\n",
+    "        self.outputDim = outputDim\n",
+    "        self.layerNum = layerNum\n",
+    "        self.use_cuda = use_cuda\n",
+    "        if cell == \"RNN\":\n",
+    "            self.cell = nn.RNN(input_size=self.inputDim, hidden_size=self.hiddenNum,\n",
+    "                        num_layers=self.layerNum, dropout=0.0,\n",
+    "                         nonlinearity=\"tanh\", batch_first=True,)\n",
+    "        if cell == \"LSTM\":\n",
+    "            self.cell = nn.LSTM(input_size=self.inputDim, hidden_size=self.hiddenNum,\n",
+    "                               num_layers=self.layerNum, dropout=0.0,\n",
+    "                               batch_first=True, )\n",
+    "        if cell == \"GRU\":\n",
+    "            self.cell = nn.GRU(input_size=self.inputDim, hidden_size=self.hiddenNum,\n",
+    "                                num_layers=self.layerNum, dropout=0.0,\n",
+    "                                 batch_first=True, )\n",
+    "        print(self.cell)\n",
+    "        self.fc = nn.Linear(self.hiddenNum, self.outputDim)\n",
+    "\n",
+    "class RNNModel(BaseModel):\n",
+    "\n",
+    "    def __init__(self, inputDim, hiddenNum, outputDim, layerNum, cell, use_cuda):\n",
+    "\n",
+    "        super(RNNModel, self).__init__(inputDim, hiddenNum, outputDim, layerNum, cell, use_cuda)\n",
+    "        \n",
+    "    def forward(self, x):\n",
+    "        \n",
+    "        batchSize = x.size(0)\n",
+    "\n",
+    "        h0 = Variable(torch.zeros(self.layerNum * 1, batchSize , self.hiddenNum)) \n",
+    "        if self.use_cuda:\n",
+    "            h0 = h0.cuda()\n",
+    "        rnnOutput, hn = self.cell(x, h0) \n",
+    "        hn = hn.view(batchSize, self.hiddenNum) \n",
+    "        fcOutput = self.fc(hn) \n",
+    "\n",
+    "        return fcOutput"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# LSTM\n",
+    "class LSTMModel(BaseModel):\n",
+    "\n",
+    "    def __init__(self, inputDim, hiddenNum, outputDim, layerNum, cell, use_cuda):\n",
+    "        super(LSTMModel, self).__init__(inputDim, hiddenNum, outputDim, layerNum, cell, use_cuda)\n",
+    "\n",
+    "    def forward(self, x):\n",
+    "\n",
+    "        batchSize = x.size(0)\n",
+    "        h0 = Variable(torch.zeros(self.layerNum * 1, batchSize, self.hiddenNum))\n",
+    "        c0 = Variable(torch.zeros(self.layerNum * 1, batchSize, self.hiddenNum))\n",
+    "        if self.use_cuda:\n",
+    "            h0 = h0.cuda()\n",
+    "            c0 = c0.cuda()\n",
+    "        rnnOutput, hn = self.cell(x, (h0, c0))\n",
+    "        hn = hn[0].view(batchSize, self.hiddenNum)\n",
+    "        fcOutput = self.fc(hn)\n",
+    "\n",
+    "        return fcOutput"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def train(trainX, trainY,  lag, lr, method, hidden_num=64, epoch=20, batchSize=32,\n",
+    "           checkPoint=10, use_cuda=False): \n",
+    "\n",
+    "    lossList = []\n",
+    "\n",
+    "    dataset = Time_Series_Data(trainX, trainY)\n",
+    "    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batchSize, shuffle=True, sampler=None,\n",
+    "                                             batch_sampler=None, num_workers=0)\n",
+    "    net = None\n",
+    "    if method == \"RNN\": \n",
+    "        net = RNNModel(inputDim=2, hiddenNum=hidden_num, outputDim=2, layerNum=1, cell=\"RNN\", use_cuda=use_cuda)\n",
+    "    if method == \"LSTM\":\n",
+    "        net = LSTMModel(inputDim=2, hiddenNum=hidden_num, outputDim=2, layerNum=1, cell=\"LSTM\", use_cuda=use_cuda)\n",
+    "    if use_cuda:\n",
+    "        net = net.cuda()\n",
+    "    net = net.train() \n",
+    "    optimizer = optim.RMSprop(net.parameters(), lr=lr, momentum=0.9)\n",
+    "    criterion = nn.MSELoss()\n",
+    "\n",
+    "    t1 = time.time()\n",
+    "    lossSum = 0\n",
+    "\n",
+    "    print(\"data loader num:\", len(dataloader))\n",
+    "\n",
+    "    for i in range(epoch):\n",
+    "\n",
+    "        for batch_idx, (x, y) in enumerate(dataloader):\n",
+    "            x, y = Variable(x), Variable(y)\n",
+    "            if use_cuda:\n",
+    "                x = x.cuda()\n",
+    "                y = y.cuda()\n",
+    "\n",
+    "            optimizer.zero_grad()\n",
+    "\n",
+    "            pred = net.forward(x)\n",
+    "            loss = criterion(pred, y)\n",
+    "\n",
+    "            lossSum += loss.item()\n",
+    "            if batch_idx % checkPoint == 0 and batch_idx != 0:\n",
+    "                print(\"batch: %d , loss is:%f\" % (batch_idx, lossSum / checkPoint))\n",
+    "                lossList.append(lossSum / checkPoint)\n",
+    "                lossSum = 0\n",
+    "\n",
+    "            loss.backward()\n",
+    "            optimizer.step()\n",
+    "\n",
+    "        print(\"%d epoch is finished!\" % (i+1))\n",
+    "\n",
+    "    t2 = time.time()\n",
+    "    print(\"train time:\", t2-t1)\n",
+    "    return net\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def predict(net, testX, use_cuda=False):\n",
+    "\n",
+    "    if use_cuda:\n",
+    "        net = net.cuda()\n",
+    "    net = net.eval()\n",
+    "    testX = torch.from_numpy(testX)\n",
+    "    testX = Variable(testX)\n",
+    "    if use_cuda:\n",
+    "        testX = testX.cuda()\n",
+    "    pred = net(testX)\n",
+    "    if use_cuda:\n",
+    "        pred = pred.cpu()\n",
+    "    return pred.data.numpy()\n",
+    "\n",
+    "\n",
+    "def predict_iteration(net, testX, lookAhead, RNN=True, use_cuda=True):\n",
+    "\n",
+    "    testBatchSize = testX.shape[0]\n",
+    "    ans = []\n",
+    "\n",
+    "    for i in range(lookAhead):\n",
+    "\n",
+    "        testX_torch = torch.from_numpy(testX)\n",
+    "        testX_torch = Variable(testX_torch)\n",
+    "        if use_cuda:\n",
+    "            testX_torch = testX_torch.cuda()\n",
+    "        pred = net(testX_torch)\n",
+    "        if use_cuda:\n",
+    "            pred = pred.cpu().data.numpy()\n",
+    "        else:\n",
+    "            pred = pred.data.numpy()\n",
+    "        pred = np.squeeze(pred)\n",
+    "        ans.append(pred)\n",
+    "\n",
+    "        testX = testX[:, 1:] \n",
+    "        if RNN:\n",
+    "            pred = pred.reshape((testBatchSize, 1, 1))\n",
+    "            testX = np.append(testX, pred, axis=1)  \n",
+    "        else:\n",
+    "            pred = pred.reshape((testBatchSize, 1))\n",
+    "            testX = np.append(testX, pred, axis=1) \n",
+    "\n",
+    "    ans = np.array(ans)\n",
+    "    ans = ans.transpose([1, 0])\n",
+    "    return ans"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#encoding=utf-8\n",
+    "from sklearn.metrics import mean_squared_error,mean_absolute_error\n",
+    "import numpy as np\n",
+    "\n",
+    "\n",
+    "# RMSE\n",
+    "def calcRMSE(true,pred):\n",
+    "    return np.sqrt(mean_squared_error(true, pred))\n",
+    "\n",
+    "\n",
+    "# MAE\n",
+    "def calcMAE(true,pred):\n",
+    "    return mean_absolute_error(true, pred)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Loading Data "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "obs_cols = [\"frame_number\", \"pedestrian_ID\", \"pos_x\", \"pos_z\", \"pos_y\", \"v_x\", \"v_z\", \"v_y\"]\n",
+    "url = \"https://raw.githubusercontent.com/AzucenaMV/SocialLSTM/master/data/joined_data.csv\"\n",
+    "df_joined = pd.read_csv(url, delimiter=',')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df_joined[\"frame_pedestrian_ID\"] = df_joined[\"dataset_ID\"].astype(str) + \"-\" + df_joined[\"frame\"].astype(str) + \"-\" + df_joined[\"pedestrian_ID\"].astype(int).astype(str)\n",
+    "df_joined[\"dataset_ID_pedestrian_ID\"] = df_joined[\"dataset_ID\"].astype(str) + \"-\"  + df_joined[\"pedestrian_ID\"].astype(int).astype(str)\n",
+    "df_joined.drop(columns=[\"Unnamed: 0\"],inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>frame</th>\n",
+       "      <th>dataset_ID</th>\n",
+       "      <th>pedestrian_ID</th>\n",
+       "      <th>x</th>\n",
+       "      <th>y</th>\n",
+       "      <th>frame_pedestrian_ID</th>\n",
+       "      <th>dataset_ID_pedestrian_ID</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>0</td>\n",
+       "      <td>71</td>\n",
+       "      <td>128.0</td>\n",
+       "      <td>4.559</td>\n",
+       "      <td>45.592</td>\n",
+       "      <td>71-0-128</td>\n",
+       "      <td>71-128</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>12</td>\n",
+       "      <td>71</td>\n",
+       "      <td>128.0</td>\n",
+       "      <td>4.559</td>\n",
+       "      <td>45.592</td>\n",
+       "      <td>71-12-128</td>\n",
+       "      <td>71-128</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>24</td>\n",
+       "      <td>71</td>\n",
+       "      <td>128.0</td>\n",
+       "      <td>4.559</td>\n",
+       "      <td>45.592</td>\n",
+       "      <td>71-24-128</td>\n",
+       "      <td>71-128</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>36</td>\n",
+       "      <td>71</td>\n",
+       "      <td>128.0</td>\n",
+       "      <td>4.559</td>\n",
+       "      <td>45.592</td>\n",
+       "      <td>71-36-128</td>\n",
+       "      <td>71-128</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>48</td>\n",
+       "      <td>71</td>\n",
+       "      <td>128.0</td>\n",
+       "      <td>4.559</td>\n",
+       "      <td>45.592</td>\n",
+       "      <td>71-48-128</td>\n",
+       "      <td>71-128</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   frame  dataset_ID  pedestrian_ID      x       y frame_pedestrian_ID  \\\n",
+       "0      0          71          128.0  4.559  45.592            71-0-128   \n",
+       "1     12          71          128.0  4.559  45.592           71-12-128   \n",
+       "2     24          71          128.0  4.559  45.592           71-24-128   \n",
+       "3     36          71          128.0  4.559  45.592           71-36-128   \n",
+       "4     48          71          128.0  4.559  45.592           71-48-128   \n",
+       "\n",
+       "  dataset_ID_pedestrian_ID  \n",
+       "0                   71-128  \n",
+       "1                   71-128  \n",
+       "2                   71-128  \n",
+       "3                   71-128  \n",
+       "4                   71-128  "
+      ]
+     },
+     "execution_count": 43,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df_joined.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Input data "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import random\n",
+    "random.seed(91)\n",
+    "split=0.7\n",
+    "train_ped = random.sample(set(df_joined.dataset_ID.values),k=int(len(set(df_joined.dataset_ID.values))*split))\n",
+    "test_ped = set(df_joined.dataset_ID.values) - set(train_ped)\n",
+    "\n",
+    "train_dataframe = df_joined[df_joined.dataset_ID.isin(train_ped)]\n",
+    "test_dataframe = df_joined[df_joined.dataset_ID.isin(test_ped)]\n",
+    "\n",
+    "#backup\n",
+    "train_dataframe.to_pickle(\"./train_dataframe.pkl\")\n",
+    "test_dataframe.to_pickle(\"./test_dataframe.pkl\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(309180, 7)"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train_dataframe.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(126220, 7)"
+      ]
+     },
+     "execution_count": 7,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "test_dataframe.shape"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "#### Setting up Training Data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "tw = 8\n",
+    "data_gp_id = train_dataframe.sort_values(['dataset_ID','frame']).groupby(['dataset_ID','pedestrian_ID'])\n",
+    "train_xy = []\n",
+    "train_xy_target = []\n",
+    "\n",
+    "for group_name, data_group in data_gp_id:\n",
+    "    L = len(data_group)\n",
+    "    for i in range(L-tw):\n",
+    "        train_xy.extend(list(zip(data_group.frame_pedestrian_ID[i:i+tw],\n",
+    "                                 data_group.x[i:i+tw],\n",
+    "                                 data_group.y[i:i+tw])))\n",
+    "        train_xy_target.extend(list(zip(data_group.frame_pedestrian_ID[i+tw:i+tw+1],\n",
+    "                                 data_group.x[i+tw:i+tw+1],\n",
+    "                                 data_group.y[i+tw:i+tw+1])))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "data_features = pd.DataFrame(train_xy, columns = ['ID','x','y'])\n",
+    "data_targets = pd.DataFrame(train_xy_target, columns = ['ID','x','y'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "num_steps_obs = 8\n",
+    "num_steps_pred = 1\n",
+    "obs = len(data_features)//num_steps_obs\n",
+    "data_features_reshape = data_features.drop(columns=['ID']) \\\n",
+    "            .values.reshape(obs, num_steps_obs, 2)\n",
+    "data_targets_reshape = data_targets.drop(columns=['ID']) \\\n",
+    "            .values.reshape(obs, 2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(1484064, 3)"
+      ]
+     },
+     "execution_count": 11,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "data_features.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(185508, 8, 2)"
+      ]
+     },
+     "execution_count": 12,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "data_features_reshape.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(185508, 8, 2)\n",
+      "(185508, 2)\n"
+     ]
+    }
+   ],
+   "source": [
+    "# train \n",
+    "X_train = data_features_reshape.copy()\n",
+    "print(X_train.shape)\n",
+    "Y_train = data_targets_reshape.copy()\n",
+    "print(Y_train.shape)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "#### Setting up Test Data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 78,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "tw = 8\n",
+    "data_gp_id = test_dataframe.sort_values(['dataset_ID','frame']).groupby(['dataset_ID','pedestrian_ID'])\n",
+    "test_xy = []\n",
+    "test_xy_target = []\n",
+    "\n",
+    "for group_name, data_group in data_gp_id:\n",
+    "    L = len(data_group)\n",
+    "    i=4\n",
+    "    test_xy.extend(list(zip(data_group.frame_pedestrian_ID[i:i+tw],\n",
+    "                             data_group.x[i:i+tw],\n",
+    "                             data_group.y[i:i+tw])))\n",
+    "    test_xy_target.extend(list(zip(data_group.frame_pedestrian_ID[i+tw:i+tw+1],\n",
+    "                             data_group.x[i+tw:i+tw+1],\n",
+    "                             data_group.y[i+tw:i+tw+1])))\n",
+    "    \n",
+    "data_features_test = pd.DataFrame(test_xy, columns = ['ID','x','y'])\n",
+    "data_targets_test = pd.DataFrame(test_xy_target, columns = ['ID','x','y'])\n",
+    "\n",
+    "num_steps_obs = 8\n",
+    "num_steps_pred = 1\n",
+    "obs = len(data_features_test)//num_steps_obs\n",
+    "data_features_reshape_test = data_features_test.drop(columns=['ID']) \\\n",
+    "            .values.reshape(obs, num_steps_obs, 2)\n",
+    "data_targets_reshape_test = data_targets_test.drop(columns=['ID']) \\\n",
+    "            .values.reshape(obs, 2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 79,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(6311, 8, 2)\n",
+      "(6311, 2)\n"
+     ]
+    }
+   ],
+   "source": [
+    "# test \n",
+    "X_test = data_features_reshape_test.copy()\n",
+    "print(X_test.shape)\n",
+    "Y_test = data_targets_reshape_test.copy()\n",
+    "print(Y_test.shape)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(50488, 3)"
+      ]
+     },
+     "execution_count": 16,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "data_features_test.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(6311, 8, 2)"
+      ]
+     },
+     "execution_count": 17,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "data_features_reshape_test.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 80,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# cast into float32\n",
+    "X_train = X_train.astype('float32')\n",
+    "X_test = X_test.astype('float32')\n",
+    "Y_train = Y_train.astype('float32')\n",
+    "Y_test = Y_test.astype('float32')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Training Model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 89,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "LSTM(2, 900, batch_first=True)\n",
+      "data loader num: 619\n",
+      "batch: 10 , loss is:160.425231\n",
+      "batch: 20 , loss is:47.789492\n",
+      "batch: 30 , loss is:33.776396\n",
+      "batch: 40 , loss is:17.463377\n",
+      "batch: 50 , loss is:8.956448\n",
+      "batch: 60 , loss is:6.540780\n",
+      "batch: 70 , loss is:5.073093\n",
+      "batch: 80 , loss is:4.656638\n",
+      "batch: 90 , loss is:3.894896\n",
+      "batch: 100 , loss is:3.405542\n",
+      "batch: 110 , loss is:2.396169\n",
+      "batch: 120 , loss is:2.467665\n",
+      "batch: 130 , loss is:2.135843\n",
+      "batch: 140 , loss is:1.795173\n",
+      "batch: 150 , loss is:1.506888\n",
+      "batch: 160 , loss is:1.389753\n",
+      "batch: 170 , loss is:0.983997\n",
+      "batch: 180 , loss is:0.854076\n",
+      "batch: 190 , loss is:0.754124\n",
+      "batch: 200 , loss is:0.693335\n",
+      "batch: 210 , loss is:0.511720\n",
+      "batch: 220 , loss is:0.533246\n",
+      "batch: 230 , loss is:0.476528\n",
+      "batch: 240 , loss is:0.373454\n",
+      "batch: 250 , loss is:0.476095\n",
+      "batch: 260 , loss is:0.461682\n",
+      "batch: 270 , loss is:0.474735\n",
+      "batch: 280 , loss is:0.578692\n",
+      "batch: 290 , loss is:0.351868\n",
+      "batch: 300 , loss is:0.394442\n",
+      "batch: 310 , loss is:0.358710\n",
+      "batch: 320 , loss is:0.306196\n",
+      "batch: 330 , loss is:0.290611\n",
+      "batch: 340 , loss is:0.302692\n",
+      "batch: 350 , loss is:0.291154\n",
+      "batch: 360 , loss is:0.206274\n",
+      "batch: 370 , loss is:0.274218\n",
+      "batch: 380 , loss is:0.280378\n",
+      "batch: 390 , loss is:0.255473\n",
+      "batch: 400 , loss is:0.236894\n",
+      "batch: 410 , loss is:0.338831\n",
+      "batch: 420 , loss is:0.277739\n",
+      "batch: 430 , loss is:0.299791\n",
+      "batch: 440 , loss is:0.316710\n",
+      "batch: 450 , loss is:0.230774\n",
+      "batch: 460 , loss is:0.256945\n",
+      "batch: 470 , loss is:0.235480\n",
+      "batch: 480 , loss is:0.206822\n",
+      "batch: 490 , loss is:0.204090\n",
+      "batch: 500 , loss is:0.199644\n",
+      "batch: 510 , loss is:0.174916\n",
+      "batch: 520 , loss is:0.171568\n",
+      "batch: 530 , loss is:0.176526\n",
+      "batch: 540 , loss is:0.198729\n",
+      "batch: 550 , loss is:0.196111\n",
+      "batch: 560 , loss is:0.230015\n",
+      "batch: 570 , loss is:0.208598\n",
+      "batch: 580 , loss is:0.182380\n",
+      "batch: 590 , loss is:0.190336\n",
+      "batch: 600 , loss is:0.192637\n",
+      "batch: 610 , loss is:0.171755\n",
+      "1 epoch is finished!\n",
+      "batch: 10 , loss is:0.376357\n",
+      "batch: 20 , loss is:0.174693\n",
+      "batch: 30 , loss is:0.125907\n",
+      "batch: 40 , loss is:0.135090\n",
+      "batch: 50 , loss is:0.127012\n",
+      "batch: 60 , loss is:0.209154\n",
+      "batch: 70 , loss is:0.158935\n",
+      "batch: 80 , loss is:0.141360\n",
+      "batch: 90 , loss is:0.164588\n",
+      "batch: 100 , loss is:0.147203\n",
+      "batch: 110 , loss is:0.128409\n",
+      "batch: 120 , loss is:0.123778\n",
+      "batch: 130 , loss is:0.146796\n",
+      "batch: 140 , loss is:0.123305\n",
+      "batch: 150 , loss is:0.128849\n",
+      "batch: 160 , loss is:0.105703\n",
+      "batch: 170 , loss is:0.114744\n",
+      "batch: 180 , loss is:0.130945\n",
+      "batch: 190 , loss is:0.119938\n",
+      "batch: 200 , loss is:0.113647\n",
+      "batch: 210 , loss is:0.104467\n",
+      "batch: 220 , loss is:0.128459\n",
+      "batch: 230 , loss is:0.105075\n",
+      "batch: 240 , loss is:0.094372\n",
+      "batch: 250 , loss is:0.113959\n",
+      "batch: 260 , loss is:0.111985\n",
+      "batch: 270 , loss is:0.109201\n",
+      "batch: 280 , loss is:0.172361\n",
+      "batch: 290 , loss is:0.112361\n",
+      "batch: 300 , loss is:0.090462\n",
+      "batch: 310 , loss is:0.091584\n",
+      "batch: 320 , loss is:0.087365\n",
+      "batch: 330 , loss is:0.133915\n",
+      "batch: 340 , loss is:0.127528\n",
+      "batch: 350 , loss is:0.107789\n",
+      "batch: 360 , loss is:0.108110\n",
+      "batch: 370 , loss is:0.142305\n",
+      "batch: 380 , loss is:0.090494\n",
+      "batch: 390 , loss is:0.078148\n",
+      "batch: 400 , loss is:0.092025\n",
+      "batch: 410 , loss is:0.087397\n",
+      "batch: 420 , loss is:0.078561\n",
+      "batch: 430 , loss is:0.099700\n",
+      "batch: 440 , loss is:0.069332\n",
+      "batch: 450 , loss is:0.075091\n",
+      "batch: 460 , loss is:0.093651\n",
+      "batch: 470 , loss is:0.085158\n",
+      "batch: 480 , loss is:0.101884\n",
+      "batch: 490 , loss is:0.091718\n",
+      "batch: 500 , loss is:0.092553\n",
+      "batch: 510 , loss is:0.081476\n",
+      "batch: 520 , loss is:0.086898\n",
+      "batch: 530 , loss is:0.076957\n",
+      "batch: 540 , loss is:0.066270\n",
+      "batch: 550 , loss is:0.088960\n",
+      "batch: 560 , loss is:0.070993\n",
+      "batch: 570 , loss is:0.104026\n",
+      "batch: 580 , loss is:0.079717\n",
+      "batch: 590 , loss is:0.082933\n",
+      "batch: 600 , loss is:0.075577\n",
+      "batch: 610 , loss is:0.102795\n",
+      "2 epoch is finished!\n",
+      "batch: 10 , loss is:0.180250\n",
+      "batch: 20 , loss is:0.085796\n",
+      "batch: 30 , loss is:0.081366\n",
+      "batch: 40 , loss is:0.069205\n",
+      "batch: 50 , loss is:0.071047\n",
+      "batch: 60 , loss is:0.060942\n",
+      "batch: 70 , loss is:0.068561\n",
+      "batch: 80 , loss is:0.074311\n",
+      "batch: 90 , loss is:0.064246\n",
+      "batch: 100 , loss is:0.051838\n",
+      "batch: 110 , loss is:0.050097\n",
+      "batch: 120 , loss is:0.053638\n",
+      "batch: 130 , loss is:0.051421\n",
+      "batch: 140 , loss is:0.050558\n",
+      "batch: 150 , loss is:0.055004\n",
+      "batch: 160 , loss is:0.062745\n",
+      "batch: 170 , loss is:0.071713\n",
+      "batch: 180 , loss is:0.065108\n",
+      "batch: 190 , loss is:0.057440\n",
+      "batch: 200 , loss is:0.062634\n",
+      "batch: 210 , loss is:0.069198\n",
+      "batch: 220 , loss is:0.061176\n",
+      "batch: 230 , loss is:0.061038\n",
+      "batch: 240 , loss is:0.092150\n",
+      "batch: 250 , loss is:0.065680\n",
+      "batch: 260 , loss is:0.073418\n",
+      "batch: 270 , loss is:0.079378\n",
+      "batch: 280 , loss is:0.068209\n",
+      "batch: 290 , loss is:0.060573\n",
+      "batch: 300 , loss is:0.074830\n",
+      "batch: 310 , loss is:0.059775\n",
+      "batch: 320 , loss is:0.058455\n",
+      "batch: 330 , loss is:0.063097\n",
+      "batch: 340 , loss is:0.067913\n",
+      "batch: 350 , loss is:0.055739\n",
+      "batch: 360 , loss is:0.054948\n",
+      "batch: 370 , loss is:0.061567\n",
+      "batch: 380 , loss is:0.063647\n",
+      "batch: 390 , loss is:0.054484\n",
+      "batch: 400 , loss is:0.042597\n",
+      "batch: 410 , loss is:0.083410\n",
+      "batch: 420 , loss is:0.045784\n",
+      "batch: 430 , loss is:0.048732\n",
+      "batch: 440 , loss is:0.051515\n",
+      "batch: 450 , loss is:0.079579\n",
+      "batch: 460 , loss is:0.046153\n",
+      "batch: 470 , loss is:0.052997\n",
+      "batch: 480 , loss is:0.045356\n",
+      "batch: 490 , loss is:0.040876\n",
+      "batch: 500 , loss is:0.047747\n",
+      "batch: 510 , loss is:0.047726\n",
+      "batch: 520 , loss is:0.045287\n",
+      "batch: 530 , loss is:0.049290\n",
+      "batch: 540 , loss is:0.047903\n",
+      "batch: 550 , loss is:0.045283\n",
+      "batch: 560 , loss is:0.047787\n",
+      "batch: 570 , loss is:0.067706\n",
+      "batch: 580 , loss is:0.054405\n",
+      "batch: 590 , loss is:0.058997\n",
+      "batch: 600 , loss is:0.054628\n",
+      "batch: 610 , loss is:0.049338\n",
+      "3 epoch is finished!\n",
+      "batch: 10 , loss is:0.139686\n",
+      "batch: 20 , loss is:0.065000\n",
+      "batch: 30 , loss is:0.054675\n",
+      "batch: 40 , loss is:0.040958\n",
+      "batch: 50 , loss is:0.049064\n",
+      "batch: 60 , loss is:0.045692\n",
+      "batch: 70 , loss is:0.044412\n",
+      "batch: 80 , loss is:0.042528\n",
+      "batch: 90 , loss is:0.045219\n",
+      "batch: 100 , loss is:0.050204\n",
+      "batch: 110 , loss is:0.042626\n",
+      "batch: 120 , loss is:0.058072\n",
+      "batch: 130 , loss is:0.043312\n",
+      "batch: 140 , loss is:0.041500\n",
+      "batch: 150 , loss is:0.041030\n",
+      "batch: 160 , loss is:0.041154\n",
+      "batch: 170 , loss is:0.046337\n",
+      "batch: 180 , loss is:0.049508\n",
+      "batch: 190 , loss is:0.045867\n",
+      "batch: 200 , loss is:0.047128\n",
+      "batch: 210 , loss is:0.058805\n",
+      "batch: 220 , loss is:0.048471\n",
+      "batch: 230 , loss is:0.059472\n",
+      "batch: 240 , loss is:0.051711\n",
+      "batch: 250 , loss is:0.049774\n",
+      "batch: 260 , loss is:0.044589\n",
+      "batch: 270 , loss is:0.056968\n",
+      "batch: 280 , loss is:0.053121\n",
+      "batch: 290 , loss is:0.058845\n",
+      "batch: 300 , loss is:0.059326\n",
+      "batch: 310 , loss is:0.072469\n",
+      "batch: 320 , loss is:0.092643\n",
+      "batch: 330 , loss is:0.049174\n",
+      "batch: 340 , loss is:0.049942\n",
+      "batch: 350 , loss is:0.040383\n",
+      "batch: 360 , loss is:0.054224\n",
+      "batch: 370 , loss is:0.042243\n",
+      "batch: 380 , loss is:0.053720\n",
+      "batch: 390 , loss is:0.044325\n",
+      "batch: 400 , loss is:0.050101\n",
+      "batch: 410 , loss is:0.036436\n",
+      "batch: 420 , loss is:0.047027\n",
+      "batch: 430 , loss is:0.047235\n",
+      "batch: 440 , loss is:0.064967\n",
+      "batch: 450 , loss is:0.063441\n",
+      "batch: 460 , loss is:0.050480\n",
+      "batch: 470 , loss is:0.041288\n",
+      "batch: 480 , loss is:0.042388\n",
+      "batch: 490 , loss is:0.051997\n",
+      "batch: 500 , loss is:0.043194\n",
+      "batch: 510 , loss is:0.037582\n",
+      "batch: 520 , loss is:0.056206\n",
+      "batch: 530 , loss is:0.045208\n",
+      "batch: 540 , loss is:0.052751\n",
+      "batch: 550 , loss is:0.044737\n",
+      "batch: 560 , loss is:0.043653\n",
+      "batch: 570 , loss is:0.050761\n",
+      "batch: 580 , loss is:0.047125\n",
+      "batch: 590 , loss is:0.069618\n",
+      "batch: 600 , loss is:0.046656\n",
+      "batch: 610 , loss is:0.044349\n",
+      "4 epoch is finished!\n",
+      "batch: 10 , loss is:0.108294\n",
+      "batch: 20 , loss is:0.045351\n",
+      "batch: 30 , loss is:0.038228\n",
+      "batch: 40 , loss is:0.036626\n",
+      "batch: 50 , loss is:0.038391\n",
+      "batch: 60 , loss is:0.041560\n",
+      "batch: 70 , loss is:0.053906\n",
+      "batch: 80 , loss is:0.058178\n",
+      "batch: 90 , loss is:0.047822\n",
+      "batch: 100 , loss is:0.038176\n",
+      "batch: 110 , loss is:0.041022\n",
+      "batch: 120 , loss is:0.083530\n",
+      "batch: 130 , loss is:0.051941\n",
+      "batch: 140 , loss is:0.050341\n",
+      "batch: 150 , loss is:0.057292\n",
+      "batch: 160 , loss is:0.044894\n",
+      "batch: 170 , loss is:0.046409\n",
+      "batch: 180 , loss is:0.036555\n",
+      "batch: 190 , loss is:0.046758\n",
+      "batch: 200 , loss is:0.054230\n",
+      "batch: 210 , loss is:0.048390\n",
+      "batch: 220 , loss is:0.044361\n",
+      "batch: 230 , loss is:0.086605\n",
+      "batch: 240 , loss is:0.050833\n",
+      "batch: 250 , loss is:0.048076\n",
+      "batch: 260 , loss is:0.046048\n",
+      "batch: 270 , loss is:0.038078\n",
+      "batch: 280 , loss is:0.047251\n",
+      "batch: 290 , loss is:0.034768\n",
+      "batch: 300 , loss is:0.040092\n",
+      "batch: 310 , loss is:0.041609\n",
+      "batch: 320 , loss is:0.042939\n",
+      "batch: 330 , loss is:0.038963\n",
+      "batch: 340 , loss is:0.045945\n",
+      "batch: 350 , loss is:0.045991\n",
+      "batch: 360 , loss is:0.051136\n",
+      "batch: 370 , loss is:0.043979\n",
+      "batch: 380 , loss is:0.051623\n",
+      "batch: 390 , loss is:0.048146\n",
+      "batch: 400 , loss is:0.050013\n",
+      "batch: 410 , loss is:0.043500\n",
+      "batch: 420 , loss is:0.050611\n",
+      "batch: 430 , loss is:0.069799\n",
+      "batch: 440 , loss is:0.043890\n",
+      "batch: 450 , loss is:0.047852\n",
+      "batch: 460 , loss is:0.051249\n",
+      "batch: 470 , loss is:0.037180\n",
+      "batch: 480 , loss is:0.054688\n",
+      "batch: 490 , loss is:0.055165\n",
+      "batch: 500 , loss is:0.056105\n",
+      "batch: 510 , loss is:0.055843\n",
+      "batch: 520 , loss is:0.039249\n",
+      "batch: 530 , loss is:0.037659\n",
+      "batch: 540 , loss is:0.042557\n",
+      "batch: 550 , loss is:0.044695\n",
+      "batch: 560 , loss is:0.053158\n",
+      "batch: 570 , loss is:0.041901\n",
+      "batch: 580 , loss is:0.043518\n",
+      "batch: 590 , loss is:0.062153\n",
+      "batch: 600 , loss is:0.035996\n",
+      "batch: 610 , loss is:0.041080\n",
+      "5 epoch is finished!\n",
+      "train time: 1739.7017440795898\n"
+     ]
+    }
+   ],
+   "source": [
+    "trained_LSTM = train(X_train, \n",
+    "                    Y_train, \n",
+    "                    lag=tw, \n",
+    "                    lr=1e-4 , \n",
+    "                    method='LSTM', \n",
+    "                    hidden_num=900, \n",
+    "                    epoch=5, \n",
+    "                    batchSize=300,\n",
+    "                    checkPoint=10, \n",
+    "                    use_cuda=False) "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "train rmse = 0.34\n",
+      "train mae = 0.46\n"
+     ]
+    }
+   ],
+   "source": [
+    "pred = predict(trained_LSTM,X_train,False)\n",
+    "print(\"train rmse =\",calcRMSE(Y_train,pred))\n",
+    "print(\"train mae =\",calcMAE(Y_train,pred))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Prediction"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def cycler(arr,pred):\n",
+    "    for i in range(arr.shape[0]):\n",
+    "        for j in range(arr.shape[1]-1):\n",
+    "            arr[i,j] = arr[i,j+1]\n",
+    "        arr[i,j+1] = pred[i]\n",
+    "    return arr"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 91,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 1 step\n",
+    "pred_test1 = predict(trained_LSTM,X_test,False)\n",
+    "\n",
+    "#2nd step\n",
+    "X_test_2 = cycler(X_test,pred_test1)\n",
+    "pred_test2 = predict(trained_LSTM,X_test_2,False)\n",
+    "\n",
+    "#3rd step\n",
+    "X_test_3 = cycler(X_test_2,pred_test2)\n",
+    "pred_test3 = predict(trained_LSTM,X_test_3,False)\n",
+    "\n",
+    "#4th step\n",
+    "X_test_4 = cycler(X_test_3,pred_test3)\n",
+    "pred_test4 = predict(trained_LSTM,X_test_4,False)\n",
+    "\n",
+    "#5th step\n",
+    "X_test_5 = cycler(X_test_4,pred_test4)\n",
+    "pred_test5 = predict(trained_LSTM,X_test_5,False)\n",
+    "\n",
+    "#6th step\n",
+    "X_test_6 = cycler(X_test_5,pred_test5)\n",
+    "pred_test6 = predict(trained_LSTM,X_test_6,False)\n",
+    "\n",
+    "#7th step\n",
+    "X_test_7 = cycler(X_test_6,pred_test6)\n",
+    "pred_test7 = predict(trained_LSTM,X_test_7,False)\n",
+    "\n",
+    "#8th step\n",
+    "X_test_8 = cycler(X_test_7,pred_test7)\n",
+    "pred_test8 = predict(trained_LSTM,X_test_8,False)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Evaluation"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 85,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "data_gp_id = test_dataframe.sort_values(['dataset_ID','frame']).groupby(['dataset_ID','pedestrian_ID'])\n",
+    "Y_test_1 = []\n",
+    "Y_test_2 = []\n",
+    "Y_test_3 = []\n",
+    "Y_test_4 = []\n",
+    "Y_test_5 = []\n",
+    "Y_test_6 = []\n",
+    "Y_test_7 = []\n",
+    "Y_test_8 = []\n",
+    "\n",
+    "for group_name, data_group in data_gp_id:\n",
+    "    L = len(data_group)\n",
+    "    i=4\n",
+    "    Y_test_1.extend(list(zip(data_group.frame_pedestrian_ID[i+tw:i+tw+1],\n",
+    "                             data_group.x[i+tw:i+tw+1],\n",
+    "                             data_group.y[i+tw:i+tw+1])))\n",
+    "    Y_test_2.extend(list(zip(data_group.frame_pedestrian_ID[i+1+tw:i+1+tw+1],\n",
+    "                             data_group.x[i+1+tw:i+1+tw+1],\n",
+    "                             data_group.y[i+1+tw:i+1+tw+1])))\n",
+    "    Y_test_3.extend(list(zip(data_group.frame_pedestrian_ID[i+2+tw:i+2+tw+1],\n",
+    "                             data_group.x[i+2+tw:i+2+tw+1],\n",
+    "                             data_group.y[i+2+tw:i+2+tw+1])))\n",
+    "    Y_test_4.extend(list(zip(data_group.frame_pedestrian_ID[i+3+tw:i+3+tw+1],\n",
+    "                             data_group.x[i+3+tw:i+3+tw+1],\n",
+    "                             data_group.y[i+3+tw:i+3+tw+1])))\n",
+    "    Y_test_5.extend(list(zip(data_group.frame_pedestrian_ID[i+4+tw:i+4+tw+1],\n",
+    "                             data_group.x[i+4+tw:i+4+tw+1],\n",
+    "                             data_group.y[i+4+tw:i+4+tw+1])))\n",
+    "    Y_test_6.extend(list(zip(data_group.frame_pedestrian_ID[i+5+tw:i+5+tw+1],\n",
+    "                             data_group.x[i+5+tw:i+5+tw+1],\n",
+    "                             data_group.y[i+5+tw:i+5+tw+1])))\n",
+    "    Y_test_7.extend(list(zip(data_group.frame_pedestrian_ID[i+6+tw:i+6+tw+1],\n",
+    "                             data_group.x[i+6+tw:i+6+tw+1],\n",
+    "                             data_group.y[i+6+tw:i+6+tw+1])))\n",
+    "    Y_test_8.extend(list(zip(data_group.frame_pedestrian_ID[i+7+tw:i+7+tw+1],\n",
+    "                             data_group.x[i+7+tw:i+7+tw+1],\n",
+    "                             data_group.y[i+7+tw:i+7+tw+1])))\n",
+    "    \n",
+    "    \n",
+    "Y_test_1 = pd.DataFrame(Y_test_1, columns = ['ID','x','y'])\n",
+    "Y_test_2 = pd.DataFrame(Y_test_2, columns = ['ID','x','y'])\n",
+    "Y_test_3 = pd.DataFrame(Y_test_3, columns = ['ID','x','y'])\n",
+    "Y_test_4 = pd.DataFrame(Y_test_4, columns = ['ID','x','y'])\n",
+    "Y_test_5 = pd.DataFrame(Y_test_5, columns = ['ID','x','y'])\n",
+    "Y_test_6 = pd.DataFrame(Y_test_6, columns = ['ID','x','y'])\n",
+    "Y_test_7 = pd.DataFrame(Y_test_7, columns = ['ID','x','y'])\n",
+    "Y_test_8 = pd.DataFrame(Y_test_8, columns = ['ID','x','y'])\n",
+    "\n",
+    "num_steps_obs = 8\n",
+    "num_steps_pred = 1\n",
+    "obs = len(data_features_test)//num_steps_obs\n",
+    "Y_test_1 = Y_test_1.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_2 = Y_test_2.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_3 = Y_test_3.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_4 = Y_test_4.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_5 = Y_test_5.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_6 = Y_test_6.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_7 = Y_test_7.drop(columns=['ID']).values.reshape(obs, 2)\n",
+    "Y_test_8 = Y_test_8.drop(columns=['ID']).values.reshape(obs, 2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 86,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "Y_test_1 = Y_test_1.astype('float32')\n",
+    "Y_test_2 = Y_test_2.astype('float32')\n",
+    "Y_test_3 = Y_test_3.astype('float32')\n",
+    "Y_test_4 = Y_test_4.astype('float32')\n",
+    "Y_test_5 = Y_test_5.astype('float32')\n",
+    "Y_test_6 = Y_test_6.astype('float32')\n",
+    "Y_test_7 = Y_test_7.astype('float32')\n",
+    "Y_test_8 = Y_test_8.astype('float32')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "test rmse = 1.19\n",
+      "test mae = 1.90\n"
+     ]
+    }
+   ],
+   "source": [
+    "RMSE_multistep = (calcRMSE(Y_test_1,pred_test1) + calcRMSE(Y_test_2,pred_test2) + calcRMSE(Y_test_3,pred_test3) \\\n",
+    "                + calcRMSE(Y_test_4,pred_test4) + calcRMSE(Y_test_5,pred_test5) + calcRMSE(Y_test_6,pred_test6) \\\n",
+    "                + calcRMSE(Y_test_7,pred_test7) + calcRMSE(Y_test_8,pred_test8))/8\n",
+    "\n",
+    "MAE_multistep = (calcMAE(Y_test_1,pred_test1) + calcMAE(Y_test_2,pred_test2) + calcMAE(Y_test_3,pred_test3) \\\n",
+    "                + calcMAE(Y_test_4,pred_test4) + calcMAE(Y_test_5,pred_test5) + calcMAE(Y_test_6,pred_test6) \\\n",
+    "                + calcMAE(Y_test_7,pred_test7) + calcMAE(Y_test_8,pred_test8))/8\n",
+    "\n",
+    "print(\"\\ntest rmse =  \",RMSE_multistep)\n",
+    "print(\"test mae = \",MAE_multistep)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
